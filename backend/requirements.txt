@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-dotenv
+httpx
+pydantic
+sqlalchemy
+psycopg2-binary
+openai-whisper
+google-generativeai
+python-multipart

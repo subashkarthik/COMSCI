@@ -1,0 +1,15 @@
+@import "tailwindcss";
+
+@theme {
+  --color-premium-dark: #0f172a;
+  --color-premium-accent: #38bdf8;
+  --color-premium-card: #1e293b;
+}
+
+body {
+  @apply bg-premium-dark text-white font-sans;
+}
+
+.premium-card {
+  @apply bg-premium-card border border-slate-700 rounded-xl p-6 shadow-xl backdrop-blur-md;
+}
