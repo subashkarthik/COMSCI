@@ -24,7 +24,8 @@ app.add_middleware(
 )
 
 from sqlalchemy.orm import Session
-from db.database import SessionLocal, FactCheck, init_db
+from db.database import SessionLocal, init_db
+from models.fact_check import FactCheck
 
 # Initialize database
 try:
