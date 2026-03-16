@@ -53,3 +53,7 @@ dist-ssr/
 Thumbs.db
 *.log
 null
+
+# Binaries
+bin/
+*.exe

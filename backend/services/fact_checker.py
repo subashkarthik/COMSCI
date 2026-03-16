@@ -1,12 +1,45 @@
 import google.generativeai as genai
 import os
+import json
+import re
 import httpx
+import traceback
+import time
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash')
+
+# Model fallback chain — if one model hits rate limits, try the next
+MODEL_CHAIN = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-lite']
+_models = {name: genai.GenerativeModel(name) for name in MODEL_CHAIN}
+
+def _generate_with_fallback(content, max_retries=2):
+    """Try generating content with model fallback chain and retry logic."""
+    last_error = None
+    for model_name in MODEL_CHAIN:
+        model = _models[model_name]
+        for attempt in range(max_retries):
+            try:
+                response = model.generate_content(content)
+                return response
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                if "429" in error_str or "ResourceExhausted" in error_str or "quota" in error_str.lower():
+                    print(f"[WARN] {model_name} quota exhausted (attempt {attempt+1}), trying next...")
+                    if attempt < max_retries - 1:
+                        time.sleep(2)  # Brief pause before retry
+                    break  # Move to next model
+                else:
+                    print(f"[ERROR] {model_name} error: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+                    else:
+                        raise  # Non-quota errors should propagate
+    
+    raise last_error  # If all models failed
 
 async def extract_claims(text: str):
     prompt = f"""
@@ -15,8 +48,13 @@ async def extract_claims(text: str):
     Text: {text}
     Return only the claim text. If no factual claim is found, return "No factual claim detected".
     """
-    response = model.generate_content(prompt)
-    return response.text.strip()
+    try:
+        response = _generate_with_fallback(prompt)
+        return response.text.strip()
+    except Exception as e:
+        print(f"[ERROR] extract_claims failed: {e}")
+        traceback.print_exc()
+        return text  # Fallback: use raw text as the claim
 
 async def search_facts(claim: str):
     if claim == "No factual claim detected":
@@ -29,31 +67,44 @@ async def search_facts(claim: str):
         'Content-Type': 'application/json'
     }
     
-    async with httpx.AsyncClient() as client:
-        response = await client.post(url, headers=headers, json=payload)
-        return response.json()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            return response.json()
+    except Exception as e:
+        print(f"[ERROR] search_facts failed: {e}")
+        traceback.print_exc()
+        return {"organic": []}
 
 async def extract_claims_from_image(image_path: str, caption: str):
-    with open(image_path, "rb") as f:
-        image_data = f.read()
-    
-    prompt = f"""
-    Analyze this image and its caption: "{caption}".
-    Extract any factual claims being made in the image text or context.
-    If the image contains a viral message or news, identify the core claim.
-    Return only the claim text. If no factual claim is found, return "No factual claim detected".
-    """
-    
-    response = model.generate_content([
-        prompt,
-        {"mime_type": "image/jpeg", "data": image_data}
-    ])
-    
-    # Clean up temp file
-    if os.path.exists(image_path):
-        os.remove(image_path)
+    try:
+        with open(image_path, "rb") as f:
+            image_data = f.read()
         
-    return response.text.strip()
+        prompt = f"""
+        Analyze this image and its caption: "{caption}".
+        Extract any factual claims being made in the image text or context.
+        If the image contains a viral message or news, identify the core claim.
+        Return only the claim text. If no factual claim is found, return "No factual claim detected".
+        """
+        
+        response = _generate_with_fallback([
+            prompt,
+            {"mime_type": "image/jpeg", "data": image_data}
+        ])
+        
+        return response.text.strip()
+    except Exception as e:
+        print(f"[ERROR] extract_claims_from_image failed: {e}")
+        traceback.print_exc()
+        return "No factual claim detected"
+    finally:
+        # Clean up temp file
+        if os.path.exists(image_path):
+            try:
+                os.remove(image_path)
+            except:
+                pass
 
 async def generate_verdict(claim: str, search_results: dict, language: str):
     if claim == "No factual claim detected":
@@ -70,7 +121,7 @@ async def generate_verdict(claim: str, search_results: dict, language: str):
     for result in search_results.get("organic", [])[:5]:
         snippets.append(f"Title: {result.get('title')}\nSnippet: {result.get('snippet')}")
     
-    context = "\n---\n".join(snippets)
+    context = "\n---\n".join(snippets) if snippets else "No search results found."
 
     prompt = f"""
     Analyze the following claim against the provided search results and provide a verdict.
@@ -93,23 +144,21 @@ async def generate_verdict(claim: str, search_results: dict, language: str):
     """
     
     try:
-        response = model.generate_content(prompt)
+        response = _generate_with_fallback(prompt)
         text = response.text.strip()
         
         # Robust JSON cleaning
         if "```" in text:
-            import re
             json_match = re.search(r'\{.*\}', text, re.DOTALL)
             if json_match:
                 text = json_match.group(0)
             
         # Try parsing to validate it before returning
-        import json
         json.loads(text) 
         return text
     except Exception as e:
-        print(f"Error parsing Gemini JSON: {e}")
-        import json
+        print(f"[ERROR] generate_verdict failed: {e}")
+        traceback.print_exc()
         return json.dumps({
             "Verdict": "Unverified",
             "Confidence Level": 0,
